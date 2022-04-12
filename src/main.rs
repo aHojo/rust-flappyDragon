@@ -1,0 +1,240 @@
+use std::fmt::format;
+use bracket_lib::prelude::*;
+
+// Constants
+const SCREEN_WIDTH: i32 = 80;
+const SCREEN_HEIGHT: i32 = 50;
+const FRAME_DURATION: f32 = 75.0;
+
+enum GameMode {
+    Menu,
+    Playing,
+    End,
+}
+struct Obstacle {
+    x:i32, // Position in world space
+    gap_y: i32, // where the player can get through
+    size: i32, // how big the gap will be.
+}
+
+impl Obstacle {
+    fn new(x: i32, score: i32) -> Self {
+        let mut random = RandomNumberGenerator::new();
+
+        Obstacle {
+            x,
+            gap_y: random.range(20,40),
+            size: i32::max(2, 20 - score),
+        }
+    }
+
+    fn render(&mut self, ctx: &mut BTerm, player_x: i32) {
+        let screen_x = self.x - player_x;
+
+        let half_size = self.size / 2;
+
+        // draw the top half of the obstacle
+        for y in 0..self.gap_y - half_size {
+            ctx.set(
+                screen_x,
+                y,
+                RED,
+                BLACK,
+                to_cp437('|')
+            );
+        }
+        // draw the bottom half of the obstacle
+        for y in self.gap_y + half_size..SCREEN_HEIGHT {
+            ctx.set(
+                screen_x,
+                y,
+                RED,
+                BLACK,
+                to_cp437('|')
+            );
+        }
+    }
+
+    fn hit_obstacle(&self, player: &Player) -> bool {
+        let half_size = self.size /2;
+        let does_x_match = player.x == self.x;
+        let player_above_gap = player.y < self.gap_y - half_size;
+        let player_below_gap = player.y > self.gap_y + half_size;
+
+        does_x_match && (player_above_gap || player_below_gap)
+
+    }
+}
+
+struct Player {
+    x: i32, // represents the world-space position. represents progress in the level
+    y: i32, // vertical position of the screen space
+    velocity: f32, // how fast they fall.
+}
+
+impl Player {
+    fn new(x: i32, y: i32) -> Self {
+        Player {
+            x,
+            y,
+            velocity: 0.0,
+        }
+    }
+
+    fn render(&mut self, ctx: &mut BTerm) {
+        // Sets a single char on the screen.
+        // x position
+        //y to where to render on the screen
+        // pub const YELLOW: (u8, u8, u8) = (255, 255, 0);
+        ctx.set(0, self.y, YELLOW, BLACK, to_cp437('@'));
+    }
+
+    fn gravity_and_move(&mut self) {
+        // Terminal velocity, don't go faster than this.
+        if self.velocity < 2.0 {
+            self.velocity += 0.2;
+        }
+
+        // as converts velocity to an i32. always rounds down.
+        // makes the char fall down.
+        self.y += self.velocity as i32;
+        self.x += 1;
+
+        if self.y < 0 {
+            self.y = 0
+        }
+    }
+
+    fn flap(&mut self) {
+        // moves the character upwards. 0 is the top of the screen.
+        self.velocity = -2.0;
+    }
+}
+
+struct State {
+    player: Player,
+    frame_time: f32, // keeps track of the accumulated time between frames, controls the speed.
+    mode: GameMode,
+    obstacle: Obstacle,
+    score: i32,
+}
+
+impl State {
+    fn new() -> Self {
+        State {
+            player: Player::new(5,25),
+            frame_time: 0.0,
+            mode: GameMode::Menu,
+            obstacle: Obstacle::new(SCREEN_WIDTH, 0),
+            score: 0,
+        }
+    }
+
+    fn play (&mut self, ctx: &mut BTerm) {
+        ctx.cls_bg(NAVY);
+        ctx.print(0, 1, &format!("Score: {}", self.score));
+
+        // Render an obstacle.
+        self.obstacle.render(ctx, self.player.x);
+        if self.player.x > self.obstacle.x {
+            self.score += 1;
+            self.obstacle = Obstacle::new(
+                self.player.x + SCREEN_WIDTH, self.score
+            );
+        }
+        if self.player.y > SCREEN_HEIGHT || self.obstacle.hit_obstacle(&self.player) {
+            self.mode = GameMode::End;
+        }
+
+        self.frame_time += ctx.frame_time_ms;
+        // The tick() funciton runs faster than 60fps,
+        // this slows the game down to FRAME_DURATION
+        if self.frame_time > FRAME_DURATION {
+            self.frame_time = 0.0;
+            self.player.gravity_and_move();
+        }
+
+        if let Some(VirtualKeyCode::Space) = ctx.key {
+            self.player.flap();
+        }
+
+        self.player.render(ctx);
+        ctx.print(0, 0, "Press Space to flap.");
+
+        // if you hit the bottom of the screen, die.
+        if self.player.y > SCREEN_HEIGHT {
+            self.mode = GameMode::End;
+        }
+    }
+
+    fn restart(&mut self) {
+        self.player = Player::new(5,25);
+        self.frame_time = 0.0;
+        self.mode = GameMode::Playing;
+        self.obstacle = Obstacle::new(SCREEN_WIDTH, 0);
+        self.score = 0;
+    }
+
+    fn main_menu(&mut self, ctx: &mut BTerm) {
+        ctx.cls();
+
+        // Centers text on the x axis
+        ctx.print_centered(5, "Welcome to Flappy Dragon");
+        ctx.print_centered(8, "(P) Play Game");
+        ctx.print_centered(9, "(Q) Quit Game");
+
+        // if let to extract the value from ctx.key into key
+        if let Some(key) = ctx.key {
+            match key {
+                VirtualKeyCode::P => self.restart(),
+                VirtualKeyCode::Q => ctx.quitting = true,
+                _ => {} // catch all, do nothing if not P or Q
+            }
+        }
+
+    }
+
+    fn dead(&mut self, ctx: &mut BTerm) {
+        ctx.cls();
+
+        // Centers text on the x axis
+        ctx.print_centered(5, "You are dead");
+        ctx.print_centered(6, &format!("You earned {} points", self.score));
+        ctx.print_centered(8, "(P) Play Game");
+        ctx.print_centered(9, "(Q) Quit Game");
+
+        // if let to extract the value from ctx.key into key
+        if let Some(key) = ctx.key {
+            match key {
+                VirtualKeyCode::P => self.restart(),
+                VirtualKeyCode::Q => ctx.quitting = true,
+                _ => {} // catch all, do nothing if not P or Q
+            }
+        }
+
+    }
+
+}
+
+// Implement this Trait. it's like an interface for other languages.
+impl GameState for State {
+    // GameState Trait requires just this function.
+    fn tick(&mut self, ctx: &mut BTerm) {
+        // Displays simple hello world
+        // ctx.cls();
+        // // 1,1 is the top left of the window.
+        // ctx.print(1,1, "Hello, Bracket Terminal");
+        match self.mode {
+            GameMode::Menu => self.main_menu(ctx),
+            GameMode::End => self.dead(ctx),
+            GameMode::Playing => self.play(ctx),
+        }
+    }
+}
+fn main() -> BError {
+    let context = BTermBuilder::simple80x50()
+        .with_title("Flappy Dragon")
+        .build()?;
+    main_loop(context, State::new()) // returns a BError
+
+}
